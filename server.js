@@ -2,9 +2,18 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const multer = require('multer'); // Import multer for file uploads
+const cloudinary = require('cloudinary').v2; // Import Cloudinary
 require('dotenv').config();
 
 const app = express();
+
+// Configure Cloudinary
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 // Middleware
 app.use(cors());
@@ -24,24 +33,15 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // Store Schema
 const storeSchema = new mongoose.Schema({
-    storeName: {
-        type: String,
-        required: true
-    },
-    address: {
-        type: String,
-        required: true
-    },
+    storeName: { type: String, required: true },
+    address: { type: String, required: true },
     location: {
         type: {
             type: String,
             enum: ['Point'],
             default: 'Point'
         },
-        coordinates: {
-            type: [Number],
-            required: true
-        }
+        coordinates: { type: [Number], required: true }
     }
 });
 
@@ -50,6 +50,56 @@ storeSchema.index({ location: '2dsphere' });
 
 // Store Model
 const Store = mongoose.model('Store', storeSchema);
+
+// Product Schema
+const productSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: { type: String, required: true },
+    stock: { type: Boolean, required: true },
+    inner_category: { type: String, required: true },
+    category: { type: String, required: true },
+    image: { type: String, required: true }, // Store image URL
+    sale_price: { type: Number, required: true },
+    original_price: { type: Number, required: true },
+    avail_outlets: { type: [String], required: true },
+    weight: { type: Number, required: true },
+    weight_unit: { type: String, enum: ['kg', 'g'], required: true }
+});
+
+// Product Model
+const Product = mongoose.model('Product', productSchema);
+
+// Set up multer for file uploads
+const storage = multer.memoryStorage(); // Store files in memory
+const upload = multer({ storage: storage });
+
+// Endpoint to handle image upload
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+    console.log('Upload endpoint hit'); // Debug log
+    if (!req.file) {
+        console.log('No file uploaded'); // Debug log
+        return res.status(400).json({ success: false, error: 'No file uploaded.' });
+    }
+
+    try {
+        // Create a stream to upload the file
+        const stream = cloudinary.uploader.upload_stream({ resource_type: 'image' }, (error, result) => {
+            if (error) {
+                console.error('Error uploading to Cloudinary:', error); // Log the error
+                return res.status(500).json({ success: false, error: 'Error uploading image to Cloudinary' });
+            }
+            // Send the response back to the client
+            console.log("Response returned")
+            res.json({ success: true, url: result.secure_url }); // Return the public URL
+        });
+
+        // End the stream with the file buffer
+        stream.end(req.file.buffer);
+    } catch (error) {
+        console.error('Error uploading image:', error);
+        res.status(500).json({ success: false, error: 'Error uploading image' });
+    }
+});
 
 // Store Management Routes
 app.get('/api/stores/all', async (req, res) => {
@@ -96,43 +146,103 @@ app.delete('/api/stores/delete/:id', async (req, res) => {
     }
 });
 
+// Product Management Routes
+app.get('/api/products/all', async (req, res) => {
+    const page = parseInt(req.query.page) || 1; // Default to page 1
+    const limit = parseInt(req.query.limit) || 5; // Default to 5 items per page
+    const skip = (page - 1) * limit;
 
+    try {
+        const products = await Product.find().skip(skip).limit(limit);
+        const totalProducts = await Product.countDocuments();
+
+        res.json({
+            success: true,
+            products,
+            totalPages: Math.ceil(totalProducts / limit),
+            currentPage: page,
+        });
+    } catch (error) {
+        console.error('Error fetching products:', error);
+        res.status(500).json({ success: false, error: 'Error fetching products' });
+    }
+});
+
+// Endpoint to create a product
+app.post('/api/products/create', async (req, res) => {
+    try {
+        const { name, description, stock, inner_category, category, image, sale_price, original_price, avail_outlets, weight, weight_unit } = req.body;
+
+        // Check if all required fields are present
+        if (!name || !description || stock === undefined || !inner_category || !category || !image || !sale_price || !original_price || !avail_outlets || !weight || !weight_unit) {
+            return res.status(400).json({ success: false, error: 'All fields are required.' });
+        }
+
+        const newProduct = new Product({
+            name,
+            description,
+            stock,
+            inner_category,
+            category,
+            image, // Use the image URL directly
+            sale_price,
+            original_price,
+            avail_outlets,
+            weight,
+            weight_unit
+        });
+
+        await newProduct.save();
+        res.json({ success: true, product: newProduct });
+    } catch (error) {
+        console.error('Error creating product:', error);
+        res.status(500).json({ success: false, error: 'Error creating product', details: error.message });
+    }
+});
+
+app.delete('/api/products/delete/:id', async (req, res) => {
+    try {
+        const result = await Product.findByIdAndDelete(req.params.id);
+        if (!result) {
+            return res.status(404).json({ success: false, error: 'Product not found' });
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error deleting product:', error);
+        res.status(500).json({ success: false, error: 'Error deleting product' });
+    }
+});
+
+// New endpoint to edit product details
+app.put('/api/products/edit/:id', async (req, res) => {
+    try {
+        const updatedProduct = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        if (!updatedProduct) {
+            return res.status(404).json({ success: false, error: 'Product not found' });
+        }
+        res.json({ success: true, product: updatedProduct });
+    } catch (error) {
+        console.error('Error editing product:', error);
+        res.status(500).json({ success: false, error: 'Error editing product' });
+    }
+});
+
+// User Schema
 const userSchema = new mongoose.Schema({
-    cart: {
-        type: Array,
-        default: []
-    },
-    my_order_price: {
-        type: Number,
-        default: 0
-    },
-    orderHistory: {
-        type: Array,
-        default: []
-    },
-    price: {
-        type: Number,
-        default: 0
-    },
-    phone: {
-        type: String,
-        required: true
-    },
+    cart: { type: Array, default: [] },
+    my_order_price: { type: Number, default: 0 },
+    orderHistory: { type: Array, default: [] },
+    price: { type: Number, default: 0 },
+    phone: { type: String, required: true },
     location: {
         type: {
             type: String,
             enum: ['Point'],
             default: 'Point'
         },
-        coordinates: {
-            type: [Number],
-            required: true
-        }
+        coordinates: { type: [Number], required: true }
     },
-    orders: {
-        type: Array,
-        default: []
-    }
+    orders: { type: Array, default: [] }
 });
 
 // User Model
@@ -183,7 +293,6 @@ app.get('/api/users/all', async (req, res) => {
     }
 });
 
-
 app.put('/api/users/edit/:id', async (req, res) => {
     try {
         const updatedUser = await User.findByIdAndUpdate(req.params.id, req.body, { new: true });
@@ -222,7 +331,7 @@ app.post('/api/admin/login', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error(err.stack);
-    res.status(500).send('Something broke!');
+    res.status(500).json({ success: false, error: 'Something broke!' }); // Ensure this is JSON
 });
 
 // Start server
